@@ -29,6 +29,7 @@ between threads, specifically:
 * Support for a close() method and an eof() check to
   allow provider threads to signal that there is no more
   data to process.
+* Iterator support
 
 ## Motivation
 
@@ -69,6 +70,53 @@ documentation.
 ## Testing
 
 Run `make`.
+
+## Caveats
+
+### Iterators
+
+concurrent_channel supports iterators for dequeueing through
+begin() and end() and it supports enqueueing via the
+channel.iwrite range.
+However, due to it's concurrent nature and due to the fact
+that you can't peek (look at an element without dequeuing
+it), there are some limitations; from the documentation:
+
+#### iwrite
+
+Range for enqueueing elements.
+
+In general, using `end()` can't be relied on; take the
+following code for instance:
+`i == end(); *i = something;` is the same as `c.eof();
+c.enqueue(i)`.  This code checks whether the channel has
+ended, but even if that check succeeds, the channel may
+still be closed between the check and calling enqueue, so
+the assignment could throw closed.
+Any sequence of calls other than `assingment; increment;
+assignment; ...` results in undefined behaviour.
+
+The iterators are invalidated by moving the queue
+into a different container.
+
+#### iread
+
+Range that can be used to read from the channel with
+iterators.
+
+`*(++i)` on the iterator is equivalent to a call to
+dequeue
+
+Comparing the iterator with `end()` or dereferencing it will
+dequeue one element and store it in the iterator. If you
+don't use it afterwards, it will be lost.
+This can happen easily for instance when using a for-in
+loop, since the for-in loop will compare with `end()`
+implicitly before running the code block.
+This also means that a comparison with `end()` might block.
+
+The iterators are invalidated by moving the queue
+into a different container.
 
 ## TODO
 

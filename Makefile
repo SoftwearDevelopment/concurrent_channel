@@ -29,7 +29,7 @@ run-test: test
 	@echo -e "\n\n----\n\n"
 	ionice -c 3 nice -n 19 ./test 90 90 80000000 2
 
-test: $(test_objs)
+test: $(test_objs) include/softwear/concurrent_channel.hpp
 	$(CXX) $(LDFLAGS) $(CXXFLAGS) $(test_objs) $(test_libs) -o test
 
 clean:

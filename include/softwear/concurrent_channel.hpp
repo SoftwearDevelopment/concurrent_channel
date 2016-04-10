@@ -10,6 +10,7 @@
 #include <exception>
 #include <type_traits>
 #include <algorithm>
+#include <iterator>
 
 #include "concurrentqueue.h"
 
@@ -34,6 +35,12 @@ class closed : public exception {
   virtual const char* what() const noexcept {
     return "Can not call close() or any enqueue method on "
         "a closed queue.";
+  };
+};
+
+class invalid_dereference : public exception {
+  virtual const char* what() const noexcept {
+    return "Tried to dereference a non-dereferencable channel iterator";
   };
 };
 
@@ -92,8 +99,168 @@ public:
 };
 
 
-
 namespace detail {
+
+
+template<typename Chan>
+class channel_input_iterator {
+public:
+  typedef channel_input_iterator<Chan> this_type;
+
+  typedef typename Chan::value_type value_type;
+  typedef value_type& reference;
+  typedef typename std::decay<value_type>::type* pointer;
+  typedef std::input_iterator_tag iterator_category;
+
+  friend Chan;
+
+private:
+  Chan &c;
+
+  bool is_end = false; // This is how we implement the reference end()
+  static this_type make_end(Chan &c) {
+    channel_input_iterator r{c};
+    r.is_end = true;
+    return r;
+  }
+
+  // TODO: This will fail for types that have no default
+  // constructor. Can we do better somehow?
+  bool current_value = false;
+  value_type cache{};
+
+  consumer_token tok;
+
+  void update_cache() {
+    if (!current_value) {
+      is_end = !c.dequeue(tok, cache);
+      current_value = true;
+    }
+  }
+
+public:
+  channel_input_iterator(Chan &c) : c{c}, tok{c} {}
+
+  channel_input_iterator(const this_type& o)
+      : c{o.c}, is_end{o.is_end}, tok{c} {}
+  this_type& operator=(const this_type& o) {
+    c = o.c;
+    is_end = o.is_end;
+    tok = consumer_token{c};
+    current_value = false;
+  }
+
+  this_type& operator++() { current_value = false; return *this; }
+
+private:
+  channel_input_iterator(Chan &c, bool is_end, value_type &&cache)
+      : c{c}, is_end{is_end}, current_value{true}, cache{std::move(cache)},
+        tok{c} {}
+public:
+  this_type operator++(int) {
+    this_type ol{c, is_end, std::move(cache)};
+    ++(*this);
+    return ol;
+  }
+
+  reference operator*() {
+    // Try getting an element; if the caller tested for
+    // end() update_cache will do nothing and we can just
+    // return the cached element; otherwise this might throw
+    // an error
+    update_cache();
+    if (is_end) throw invalid_dereference();
+    return cache;
+  }
+  pointer operator->() { return &(**this); }
+
+  bool operator==(const this_type& o) {
+    if (&c != &o.c) return false; // Different channels
+    if (o.current_value) return false; // Other queue is definitely not == end()
+    // Make sure we definitely have an element cached since
+    // the queue might become closed between the caller
+    // testing for end and actually dereferencing it.
+    update_cache();
+    return is_end;
+  }
+  template<typename T>
+  bool operator!=(const T &o) { return !(*this == o); }
+
+  void swap(this_type &o) {
+    std::swap(c, o.c);
+    std::swap(is_end, o.is_end);
+    std::swap(current_value, o.current_value);
+    std::swap(cache, o.cache);
+    std::swap(tok, o.tok);
+  }
+};
+
+template<typename Chan>
+class channel_output_iterator {
+public:
+  typedef channel_output_iterator<Chan> this_type;
+
+  typedef typename Chan::value_type value_type;
+  typedef value_type& reference;
+  typedef typename std::decay<value_type>::type* pointer;
+  typedef std::output_iterator_tag iterator_category;
+
+  friend Chan;
+
+private:
+  Chan &c;
+
+  bool is_end_ = false; // This is how we implement the reference end()
+  static this_type make_end(Chan &c) {
+    channel_output_iterator r{c};
+    r.is_end_ = true;
+    return r;
+  }
+  bool is_end() { return is_end_ || c.closed(); }
+
+  producer_token tok{c};
+public:
+  channel_output_iterator(Chan &c) : c{c}, tok{c}, proxy{*this} {}
+
+  channel_output_iterator(const this_type& o) : c{o.c}, is_end_{o.is_end_} {}
+  this_type& operator=(const this_type& o) {
+    c = o.c;
+    is_end_ == o.is_end_;
+    tok = producer_token{c};
+  }
+
+  class proxy_t {
+    this_type &it;
+
+    proxy_t(this_type &it) : it{it} {}
+    friend this_type;
+  public:
+    void operator=(const value_type &v) {
+      it.c.enqueue(it.tok, v);
+    }
+
+    void operator=(value_type &&v) {
+      it.c.enqueue(it.tok, std::move(v));
+    }
+  } proxy{*this};
+
+  this_type& operator++() { return *this; }
+  this_type operator++(int) { return ++(*this); }
+
+  proxy_t& operator*() { return proxy; }
+
+  bool operator==(const this_type& o) {
+    return is_end() && o.is_end() && &c == &o.c;
+  }
+  template<typename T>
+  bool operator!=(const T &o) { return !(*this == o); }
+
+  void swap(this_type &o) {
+    std::swap(c, o.c);
+    std::swap(is_end_, o.is_end_);
+    std::swap(tok, o.tok);
+  }
+};
 
 // As stolen from
 // https://github.com/cameron314/concurrentqueue/issues/46#issuecomment-205961910
@@ -101,9 +268,13 @@ template<typename It>
 class input_iterator_ref_wrapper {
   It& ref;
 
-public: 
+public:
   typedef input_iterator_ref_wrapper<It> this_type;
+
   typedef decltype(*ref) value_type;
+  typedef value_type& reference;
+  typedef typename std::decay<value_type>::type* pointer;
+  typedef std::input_iterator_tag iterator_category;
 
   input_iterator_ref_wrapper(It& ref) : ref(ref) { }
 
@@ -187,7 +358,7 @@ private:
   queue_t intern;
 
 public:
-  
+
   typedef T value_type;
   typedef Traits traits_type;
 
@@ -275,11 +446,7 @@ private:
     size_t no;
 
     reservation(this_type &chan_, size_t no) : chan(&chan_), no(no) {
-      if (chan) {
-        //std::cerr << "RESERVE " << no << " : " << chan->enqueue_slots_used << " -> ";
-        //std::cerr << (chan->enqueue_slots_used += no) << "\n";
-        chan->enqueue_slots_used += no;
-      }
+      if (chan) chan->enqueue_slots_used += no;
     }
 
     ~reservation() {
@@ -420,7 +587,7 @@ public:
     auto o = enqueue_op();
 
     concurrent_channel_::detail::input_iterator_ref_wrapper<It> i{itemFirst};
-    
+
     size_t done = 0;
     while (done < count) {
       auto r = wait_reserve(count - done);
@@ -447,7 +614,7 @@ public:
     auto o = enqueue_op();
 
     concurrent_channel_::detail::input_iterator_ref_wrapper<It> i{itemFirst};
-    
+
     size_t done = 0;
     while (done < count) {
       auto r = wait_reserve(count - done);
@@ -669,6 +836,67 @@ public:
 	size_t try_dequeue_bulk(consumer_token& token, It itemFirst, size_t max) {
     return intern.template try_dequeue_bulk<It>( token, itemFirst, max );
 	}
+
+private:
+  typedef concurrent_channel_::detail::channel_input_iterator<this_type> RIt;
+  typedef concurrent_channel_::detail::channel_output_iterator<this_type> WIt;
+
+public:
+  /// Iterator that can be used to read from the channel.
+  ///
+  /// *(++i) on the iterator is equivalent to a call to
+  /// dequeue
+  ///
+  /// Comparing the iterator with end() or
+  /// dereferencing it will dequeue one element and store it
+  /// in the iterator. If you don't use it afterwards, it
+  /// will be lost.
+  /// This can happen easily for instance when using a for-in
+  /// loop, since the for-in loop will compare with end()
+  /// implicitly before running the code block.
+  /// This also means that a comparison with end() might
+  /// block.
+  ///
+  /// The iterators are invalidated by moving the queue
+  /// into a different container.
+  RIt begin() {
+    return RIt{*this};
+  }
+
+  /// End of the iterator that can be used for reading.
+  RIt end() {
+    return RIt::make_end(*this);
+  }
+
+  /// Range for enqueueing elements.
+  ///
+  /// In general, using end() can't be relied on; take the
+  /// following code for instance:
+  /// `i == end(); *i = something;` is the same as `c.eof(); c.enqueue(i)`.
+  /// This code checks whether the channel has ended, but
+  /// even if that check succeeds, the channel may still be
+  /// closed between the check and calling enqueue, so the
+  /// assignment could throw closed.
+  /// Any sequence of calls other than `assingment;
+  /// increment; assignment; ...` results in undefined
+  /// behaviour.
+  ///
+  /// The iterators are invalidated by moving the queue
+  /// into a different container.
+  class iwrite_t {
+    this_type &c;
+
+    iwrite_t(this_type &c) : c{c} {}
+    friend this_type;
+  public:
+    WIt begin() {
+      return WIt{c};
+    }
+
+    WIt end() {
+      return WIt::make_end(c);
+    }
+  } iwrite{*this};
 
 
 public:

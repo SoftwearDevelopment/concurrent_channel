@@ -249,7 +249,7 @@ void producer(chan &c, pkg_tracker &pkgc, atomic<size_t> &errc,
   chan::producer_token tok{c};
   std::vector<test_packet> bulk_buf;
   bulk_buf.reserve(4000);
-  
+
   // TODO: Test non blocking enqueue
 
   try { // Wait for the pipe closed signal
@@ -262,47 +262,38 @@ void producer(chan &c, pkg_tracker &pkgc, atomic<size_t> &errc,
 
       // TODO: Make sure each kind has been run N times
       bool bulk = decide(0.1);
+      bool itr  = decide(0.05);
       int  bulk_size = decide(0.01) ? 0 // 1% empty
                                     : random<int>(1, bulk_buf.capacity());
       bool use_move = decide(0.01);
       bool use_tok = decide(0.6);
       bool use_try = decide(0.05);
 
-      if (!bulk) { // SINGLE MODE TEST
+      if (itr) { // ITERATOR
 
-        test_packet p;
+        // TODO: Reuse code from bulk
+        bulk_buf.clear(); // Init the bulk of test packages
+        bulk_buf.resize(bulk_size);
 
-        p.expected_moves = 1; // Accounting for the move out of the queue
-        if (use_move) p.expected_moves  = 2; // here too
-        else          p.expected_copies = 1;
-
-        if (!use_try){ // BLOCKING
-          if ( use_move &&  use_tok) c.enqueue(tok, move(p));
-          if ( use_move && !use_tok) c.enqueue(     move(p));
-          if (!use_move &&  use_tok) c.enqueue(tok, p);
-          if (!use_move && !use_tok) c.enqueue(     p);
-
-        } else { // NON BLOCKING
-
-          bool suc = false;
-          while (!suc) {
-            // TODO: Can we check whether they're really
-            // returning immediately?
-            if ( use_move &&  use_tok) suc = c.try_enqueue(tok, move(p));
-            if ( use_move && !use_tok) suc = c.try_enqueue(     move(p));
-            if (!use_move &&  use_tok) suc = c.try_enqueue(tok, p);
-            if (!use_move && !use_tok) suc = c.try_enqueue(     p);
-          }
-
+        for (auto &p : bulk_buf) {
+          p.expected_moves = 1; // Accounting for the move out of the queue
+          if (use_move) p.expected_moves  = 2; // here too
+          else          p.expected_copies = 1;
         }
 
-        ASSERT_LE(errc, pkgc.insert(p.id), (size_t)2)
-          << "Assumed producer would be the first or second to insert packet '"
-          << p.id << "'. Collision?" << std::endl;
+        auto i = c.iwrite.begin();
+        for (auto &p : bulk_buf) {
+          if (use_move) *(++i) = std::move(p);
+          else          *(++i) = p;
 
-        pkg_sent++;
+          ASSERT_LE(errc, pkgc.insert(p.id), (size_t)2)
+            << "Assumed producer would be the first or second to insert packet '"
+            << p.id << "'. Collision?" << std::endl;
 
-      } else { // BATCH MODE TEST
+          pkg_sent++;
+        }
+
+      } else if (bulk) { // BATCH MODE TEST
 
         bulk_buf.clear(); // Init the bulk of test packages
         bulk_buf.resize(bulk_size);
@@ -359,8 +350,39 @@ void producer(chan &c, pkg_tracker &pkgc, atomic<size_t> &errc,
         }
 
         pkg_sent += bulk_size;
-      }
+      } else { // SINGLE MODE TEST
 
+        test_packet p;
+
+        p.expected_moves = 1; // Accounting for the move out of the queue
+        if (use_move) p.expected_moves  = 2; // here too
+        else          p.expected_copies = 1;
+
+        if (!use_try){ // BLOCKING
+          if ( use_move &&  use_tok) c.enqueue(tok, move(p));
+          if ( use_move && !use_tok) c.enqueue(     move(p));
+          if (!use_move &&  use_tok) c.enqueue(tok, p);
+          if (!use_move && !use_tok) c.enqueue(     p);
+
+        } else { // NON BLOCKING
+
+          bool suc = false;
+          while (!suc) {
+            // TODO: Can we check whether they're really
+            // returning immediately?
+            if ( use_move &&  use_tok) suc = c.try_enqueue(tok, move(p));
+            if ( use_move && !use_tok) suc = c.try_enqueue(     move(p));
+            if (!use_move &&  use_tok) suc = c.try_enqueue(tok, p);
+            if (!use_move && !use_tok) suc = c.try_enqueue(     p);
+          }
+        }
+
+        ASSERT_LE(errc, pkgc.insert(p.id), (size_t)2)
+          << "Assumed producer would be the first or second to insert packet '"
+          << p.id << "'. Collision?" << std::endl;
+
+        pkg_sent++;
+      }
     }
   } catch (chan::closed &e) {
     // pass; business as usual; this is just the signal to
@@ -369,10 +391,10 @@ void producer(chan &c, pkg_tracker &pkgc, atomic<size_t> &errc,
 
   // Test that the channel really is closed and enforces
   // that!
-  
+
   ASSERT(errc, !c.is_open())
     << "Some producer should have closed the channel." << std::endl;
-  
+
   test_packet p;
 
   ASSERT_THROW(errc, chan::closed, c.enqueue(     p));
@@ -420,21 +442,36 @@ void consumer(chan &c, pkg_tracker &pkgc, atomic<size_t> &errc,
     // Randomize //
 
     bool bulk = decide(0.1);
+    bool itr  = decide(0.05);
 
-    int  bulk_size;
-    if (!bulk)             bulk_size = 1;
-    else if (decide(0.01)) bulk_size = 0;
-    else                   bulk_size = random<int>(1, bulk_buf.capacity());
+    size_t bulk_size;
+    if      (!bulk && !itr)        bulk_size = 1;
+    else if (decide(0.01) && !itr) bulk_size = 0;
+    else                           bulk_size = random<int>(1, bulk_buf.capacity());
 
     bool use_tok = decide(0.7);
     bool use_try = decide(0.05);
 
     // Dequeue //
-    
+
     // using zero_packet here to avoid unnecessary rng.
     bulk_buf.resize(bulk_size, zero_packet);
 
-    if (!use_try) {
+    if (itr) { // ITERATOR DEQUEUE
+
+      size_t no=0;
+      for (auto &p : c) {
+        p.expected_moves++; // The iterator needs one additional move
+        bulk_buf[no] = move(p);
+
+        // Implicitly limiting the bulk_size to at least 1 here
+        no++;
+        if (no >= bulk_size) break;
+      }
+      bulk_buf.resize(no);
+      eof = no == 0;
+
+    } else if (!use_try) {
       if (!bulk) {
 
         // SINGLE BLOCKiNG
@@ -454,7 +491,7 @@ void consumer(chan &c, pkg_tracker &pkgc, atomic<size_t> &errc,
     } else {
 
       if (!bulk) {
-        
+
         // SINGLE NON-BLOCKING
         eof = c.eof();
         bool suc;
@@ -463,7 +500,7 @@ void consumer(chan &c, pkg_tracker &pkgc, atomic<size_t> &errc,
         bulk_buf.resize(suc ? 1 : 0);
 
       } else  {
-        
+
         // BULK NON-BLOCKING
         eof = c.eof();
         size_t no;
@@ -501,11 +538,12 @@ int main(int argc, char **argv) {
 
   if (argc >= 2 && std::string(argv[1]) == "--help") {
     std::cerr << "USAGE: ./test "
-      << "[PRODUCER_THREADS] [CONSUMER_THREDS] [PACKAGE_NUMER] [CHANNEL_CAPACOITY]"
-      << "\n\n./test 2 3 10000"
-      << "\n Would start 2 producer threads, 3 consumer tests and "
-      << "would quit testing after 10k test packages sent through "
-      << "the channel.\n";
+         "[PRODUCER_THREADS] [CONSUMER_THREADS] "
+         "[PACKAGE_NUMBER] [CHANNEL_CAPACITY]"
+         "\n\n./test 2 3 10000"
+         "\n Would start 2 producer threads, 3 consumer tests and "
+         "would quit testing after 10k test packages sent through "
+         "the channel.\n";
     return 0;
   }
 
@@ -527,6 +565,9 @@ int main(int argc, char **argv) {
 
   // DECLARE ALL DATA (AVOIDING GLOBAL STATE ///////////////
   // The actual pipe we're testing
+
+  // TODO: Test move assignment & construction
+  // TODO: Add pure, single threaded unit tests
   chan c;
   c.capacity_approx(producer_no);
   if (argc >= 5) c.capacity_approx(strtoul(argv[4], NULL, 10));
@@ -545,7 +586,7 @@ int main(int argc, char **argv) {
   // been received and to stop the test after we tested 20M
   atomic<size_t> pkg_sent{0}, pkg_recvd{0};
 
-  std::cerr 
+  std::cerr
     << "\n[INFO] Starting tests; printing statistics while doing so. "
     << "Keep in mind that we are searching for race conditions, running "
     << "with many threads. All the statistics are not stabilized until "
@@ -564,7 +605,7 @@ int main(int argc, char **argv) {
     << "\n[INFO] W R and TrackedUniq should be roughly the same; TrackTotal "
     << "should be TrackedUniq*2, Er should stay zero.\n\n";
 
-  auto report = [&]() { 
+  auto report = [&]() {
     std::cerr << "[INFO]"
       << (!c.is_open() ? " [CLOSED]" : "")
       << (c.eof() ? " [EOF]" : "")
@@ -587,7 +628,7 @@ int main(int argc, char **argv) {
 
   // Observer Thread
   atomic<bool> stop_observer{false};
-  std::thread observer{[&]() { 
+  std::thread observer{[&]() {
     size_t old_pkg_recvd = pkg_recvd, old_pkg_sent = pkg_sent;
     uint64_t lastcheck = milli_epoch();
 
@@ -625,11 +666,11 @@ int main(int argc, char **argv) {
 
 
   // SHUTDOWN & FINAL STATE CHECKS /////////////////////////
-  
+
   ASSERT(errc, c.eof()) << "Consumers should have drained the pipe\n";
 
   for (auto &pair : pkgc) {
-    ASSERT_EQ(errc, pair.second, (uint64_t)2) 
+    ASSERT_EQ(errc, pair.second, (uint64_t)2)
       << "Packet #" << pair.first << " should have been inserted "
       << "twice: Once by the consumer and once by the producer.`\n";
   }
