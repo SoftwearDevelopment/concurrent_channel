@@ -1,5 +1,4 @@
-#ifndef SOFTWEAR_CONCURRENT_PIPE_HEADER
-#define SOFTWEAR_CONCURRENT_PIPE_HEADER
+#pragma once
 
 #include <cstdint>
 #include <cmath>
@@ -995,5 +994,3 @@ public:
 };
 
 }
-
-#endif
