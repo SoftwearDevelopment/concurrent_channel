@@ -110,6 +110,7 @@ public:
   typedef value_type& reference;
   typedef typename std::decay<value_type>::type* pointer;
   typedef std::input_iterator_tag iterator_category;
+  typedef size_t difference_type;
 
   friend Chan;
 
@@ -203,6 +204,7 @@ public:
   typedef value_type& reference;
   typedef typename std::decay<value_type>::type* pointer;
   typedef std::output_iterator_tag iterator_category;
+  typedef size_t difference_type;
 
   friend Chan;
 

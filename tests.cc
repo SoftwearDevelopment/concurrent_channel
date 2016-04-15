@@ -13,6 +13,7 @@
 #include <string>
 #include <chrono>
 #include <iomanip>
+#include <type_traits>
 
 #include "softwear/concurrent_channel.hpp"
 
@@ -20,6 +21,8 @@ using std::move;
 using std::forward;
 using std::atomic;
 using std::to_string;
+using std::begin;
+using std::end;
 
 using softwear::concurrent_channel;
 
@@ -189,6 +192,9 @@ null_stream cnull;
     }                                                       \
   })() ) << "; `" << #statement << "` should have thrown `" \
          << #exception << "`"
+
+#define ASSERT_SAME_TYPE(a, b, s) \
+  static_assert(std::is_same<a, b>::value, s)
 
 // Tests ///////////////////////////////////////////////////
 
@@ -562,7 +568,6 @@ int main(int argc, char **argv) {
   if (argc >= 3) consumer_no = strtoul(argv[2], NULL, 10);
   if (argc >= 4) test_mag = strtoul(argv[3], NULL, 10);
 
-
   // DECLARE ALL DATA (AVOIDING GLOBAL STATE ///////////////
   // The actual pipe we're testing
 
@@ -571,6 +576,20 @@ int main(int argc, char **argv) {
   chan c;
   c.capacity_approx(producer_no);
   if (argc >= 5) c.capacity_approx(strtoul(argv[4], NULL, 10));
+
+  typedef decltype(begin(c.iwrite)) iWbeg;
+  typedef decltype(end(c.iwrite))   iWend;
+  typedef decltype(begin(c))        iRbeg;
+  typedef decltype(end(c))          iRend;
+  ASSERT_SAME_TYPE(iWbeg, iWend, "iwrite's begin and end should be same type");
+  ASSERT_SAME_TYPE(iRbeg, iRend, "channel's begin and end should be same type");
+
+  typedef std::iterator_traits<iWbeg>::value_type iWtrait_value_type;
+  typedef std::iterator_traits<iRbeg>::value_type iRtrait_value_type;
+  ASSERT_SAME_TYPE(iWtrait_value_type, test_packet,
+    "write iter should support traits");
+  ASSERT_SAME_TYPE(iRtrait_value_type, test_packet,
+    "read iter should support traits");
 
   // Producer & consumer add to this once each; the producer
   // expects to be the first who adds a package, the
